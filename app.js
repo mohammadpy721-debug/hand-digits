@@ -104,20 +104,25 @@
     tctx.clearRect(0, 0, trail.width, trail.height);
     if (stroke.length < 2) return;
     tctx.lineCap = 'round'; tctx.lineJoin = 'round';
-    for (let pass = 0; pass < 2; pass++) {
-      tctx.lineWidth = pass ? 4 : 14;
-      tctx.strokeStyle = pass ? '#ffffff' : 'rgba(168,85,247,.55)';
-      tctx.shadowColor = '#c084fc'; tctx.shadowBlur = pass ? 10 : 24;
-      tctx.beginPath();
-      stroke.forEach((p, i) => { const x = p.x * trail.width, y = p.y * trail.height; i ? tctx.lineTo(x, y) : tctx.moveTo(x, y); });
-      tctx.stroke();
+    const base = (now / 12) % 360;
+    for (let i = 1; i < stroke.length; i++) {
+      const a = stroke[i - 1], b = stroke[i];
+      const hue = (base + i * 4) % 360;
+      const fade = i / stroke.length;
+      tctx.strokeStyle = `hsla(${hue} 100% 65% / ${0.25 + 0.75 * fade})`;
+      tctx.shadowColor = `hsl(${hue} 100% 60%)`; tctx.shadowBlur = 22;
+      tctx.lineWidth = 6 + 8 * fade;
+      tctx.beginPath(); tctx.moveTo(a.x * trail.width, a.y * trail.height); tctx.lineTo(b.x * trail.width, b.y * trail.height); tctx.stroke();
     }
+    tctx.shadowBlur = 0;
   }
+
   function finishStroke() {
     if (stroke.length > 12) {
       const pts = stroke.map(p => ({ x: p.x * 500, y: p.y * 500 }));
       const r = ONE.recognize(pts, TEMPLATES);
       const ok = r.score > 0.55;
+      lastStroke = pts;
       const label = ok ? r.name : '?';
       writeOut.textContent = label;
       writeOut.title = `اطمینان ${(r.score * 100).toFixed(0)}٪`;
@@ -176,6 +181,10 @@
       pointing = true; lastDrawAt = now;
       stroke.push({ x: 1 - pointer.x, y: pointer.y });
       if (Math.random() < 0.5) spark((1 - pointer.x) * fx.width, pointer.y * fx.height);
+      const hx = (1 - pointer.x) * overlay.width, hy = pointer.y * overlay.height;
+      const grd = octx.createRadialGradient(hx, hy, 0, hx, hy, 34);
+      grd.addColorStop(0, 'rgba(255,255,255,.95)'); grd.addColorStop(0.3, 'rgba(192,132,252,.7)'); grd.addColorStop(1, 'rgba(192,132,252,0)');
+      octx.fillStyle = grd; octx.beginPath(); octx.arc(hx, hy, 34, 0, Math.PI * 2); octx.fill();
       drawTrail(now);
     } else if (pointing && now - lastDrawAt > STROKE_END_MS) {
       pointing = false; finishStroke();
@@ -225,7 +234,28 @@
     trail.width = vw; trail.height = vh;
   });
 
-  const TEMPLATES = Object.entries(STROKES).map(([n, p]) => ONE.makeTemplate(n, p.map(([x, y]) => ({ x: x * 5, y: y * 5 }))));
+  const BASE_TEMPLATES = Object.entries(STROKES).map(([n, p]) => ONE.makeTemplate(n, p.map(([x, y]) => ({ x: x * 5, y: y * 5 }))));
+  const STORE_KEY = 'hand-digits-custom-v1';
+  function loadCustom() { try { return JSON.parse(localStorage.getItem(STORE_KEY) || '[]'); } catch (e) { return []; } }
+  function saveCustom(list) { try { localStorage.setItem(STORE_KEY, JSON.stringify(list.slice(-200))); } catch (e) {} }
+  let custom = loadCustom();
+  let TEMPLATES = BASE_TEMPLATES.concat(custom.map(c => ONE.makeTemplate(c.name, c.points)));
+  let lastStroke = null; // normalized points (500 scale) of the last recognized stroke
+  function learnCorrection(label) {
+    if (!lastStroke) return;
+    const answer = (window.prompt('کدوم حرف یا عدد بود؟ (مثلاً A یا 7)', label === '?' ? '' : label) || '').trim().toUpperCase();
+    if (!answer || answer.length !== 1 || !/[0-9A-Z]/.test(answer)) return;
+    custom.push({ name: answer, points: lastStroke });
+    saveCustom(custom);
+    TEMPLATES = BASE_TEMPLATES.concat(custom.map(c => ONE.makeTemplate(c.name, c.points)));
+    writeOut.textContent = answer;
+    hint.textContent = `ذخیره شد: این خط‌خطی حالا به‌عنوان «${answer}» یاد گرفته شد.`;
+    beep(760, 0.12, 'triangle');
+    burst(fx.width / 2, fx.height / 3, 40, ['#4ade80', '#22d3ee']);
+  }
+  writeOut.style.cursor = 'pointer';
+  writeOut.title = 'برای اصلاح، کلیک کن';
+  writeOut.addEventListener('click', () => learnCorrection(writeOut.textContent));
 
   function sizeFx() { fx.width = fx.clientWidth * 2; fx.height = fx.clientHeight * 2; }
   window.addEventListener('resize', sizeFx); sizeFx(); requestAnimationFrame(tickFx);
