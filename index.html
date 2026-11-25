@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand Digits</title>
+<style>
+  :root { --bg:#07030f; --fg:#ede9fe; --card:#130a24; --accent:#a855f7; --accent2:#22d3ee; --muted:#9ca3af; --border:#3b2a6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(900px 400px at 50% -10%, rgba(168,85,247,.25), transparent), var(--bg); color:var(--fg); font-family:system-ui,sans-serif; padding:20px 14px; }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { margin:0 0 14px; font-size:1.5rem; background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .stage { position:relative; width:100%; aspect-ratio:4/3; border-radius:16px; overflow:hidden; background:#000; border:1px solid var(--border); box-shadow:0 0 40px rgba(168,85,247,.25); }
+  .stage video, .stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .stage video { transform:scaleX(-1); object-fit:cover; }
+  .stage #trail { pointer-events:none; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+  @media (max-width:600px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; text-align:center; }
+  .label { color:var(--muted); font-size:.85rem; }
+  .big { font-size:4.5rem; font-weight:800; color:var(--accent2); text-shadow:0 0 18px rgba(34,211,238,.6); line-height:1.1; }
+  button { font:inherit; padding:10px 16px; border-radius:10px; border:none; background:linear-gradient(90deg,var(--accent),var(--accent2)); color:#fff; cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.5; }
+  .row { display:flex; gap:10px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:14px; }
+  .hint { color:var(--muted); font-size:.9rem; margin-top:8px; min-height:1.2em; }
+  .tips { color:var(--muted); font-size:.85rem; line-height:1.9; margin-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>✋ Hand Digits</h1>
+
+  <div class="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="trail" width="500" height="500"></canvas>
+  </div>
+
+  <div class="row">
+    <button id="start">فعال کردن دوربین</button>
+    <button id="clear">پاک کردن</button>
+  </div>
+  <p class="status" id="status" style="color:var(--muted);text-align:center;margin:8px 0 0"></p>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">تعداد انگشت‌ها (هر دو دست)</div>
+      <div class="big" id="finger">–</div>
+    </div>
+    <div class="card">
+      <div class="label">نوشته‌شده در هوا</div>
+      <div class="big" id="write">–</div>
+    </div>
+  </div>
+  <p class="hint" id="hint"></p>
+
+  <div class="tips">
+    راهنما: با انگشت اشاره بنویس؛ بعد از کمی مکث، نوشته تشخیص داده می‌شه. دست مشت‌شده یک ثانیه نگه دار تا صفحه پاک شه. با دو دست می‌تونی تا ۱۰ رو نشون بدی.
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+// $1 Unistroke Recognizer (Wobbrock et al.), adapted. Pure JS, no training.
+const ONE = (() => {
+  const N = 64, SIZE = 250, HALF_DIAG = 0.5 * Math.sqrt(SIZE * SIZE + SIZE * SIZE);
+  const ANGLE_RANGE = 45 * Math.PI / 180, ANGLE_PREC = 2 * Math.PI / 180, PHI = 0.5 * (-1 + Math.sqrt(5));
+
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  function pathLength(pts) { let d = 0; for (let i = 1; i < pts.length; i++) d += dist(pts[i - 1], pts[i]); return d; }
+
+  function resample(pts, n) {
+    const I = pathLength(pts) / (n - 1);
+    let D = 0; const out = [pts[0]]; const src = pts.map(p => ({ x: p.x, y: p.y }));
+    for (let i = 1; i < src.length; i++) {
+      const d = dist(src[i - 1], src[i]);
+      if (D + d >= I) {
+        const t = (I - D) / d;
+        const q = { x: src[i - 1].x + t * (src[i].x - src[i - 1].x), y: src[i - 1].y + t * (src[i].y - src[i - 1].y) };
+        out.push(q); src.splice(i, 0, q); D = 0;
+      } else D += d;
+    }
+    while (out.length < n) out.push(src[src.length - 1]);
+    return out.slice(0, n);
+  }
+
+  function centroid(pts) { let x = 0, y = 0; for (const p of pts) { x += p.x; y += p.y; } return { x: x / pts.length, y: y / pts.length }; }
+
+  function rotateBy(pts, a) {
+    const c = centroid(pts), cs = Math.cos(a), sn = Math.sin(a);
+    return pts.map(p => ({ x: (p.x - c.x) * cs - (p.y - c.y) * sn + c.x, y: (p.x - c.x) * sn + (p.y - c.y) * cs + c.y }));
+  }
+
+  function scaleTo(pts, size) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of pts) { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+    const w = maxX - minX || 1, h = maxY - minY || 1;
+    return pts.map(p => ({ x: p.x * size / w, y: p.y * size / h }));
+  }
+
+  function translateTo(pts, k) { const c = centroid(pts); return pts.map(p => ({ x: p.x - c.x + k.x, y: p.y - c.y + k.y })); }
+
+  function pathDistance(a, b) { let d = 0; for (let i = 0; i < a.length; i++) d += dist(a[i], b[i]); return d / a.length; }
+
+  function normalize(raw) {
+    let pts = resample(raw, N);
+    const c = centroid(pts);
+    const indicative = Math.atan2(pts[0].y - c.y, pts[0].x - c.x);
+    pts = rotateBy(pts, -indicative);
+    pts = scaleTo(pts, SIZE);
+    return translateTo(pts, { x: 0, y: 0 });
+  }
+
+  function recognize(raw, templates) {
+    if (!raw || raw.length < 8) return { name: null, score: 0 };
+    const pts = normalize(raw);
+    let best = Infinity, name = null;
+    for (const t of templates) {
+      // golden-section search over rotation
+      let a = -ANGLE_RANGE, b = ANGLE_RANGE;
+      let x1 = PHI * a + (1 - PHI) * b, x2 = (1 - PHI) * a + PHI * b;
+      let f1 = pathDistance(rotateBy(pts, x1), t.points), f2 = pathDistance(rotateBy(pts, x2), t.points);
+      while (Math.abs(b - a) > ANGLE_PREC) {
+        if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = PHI * a + (1 - PHI) * b; f1 = pathDistance(rotateBy(pts, x1), t.points); }
+        else { a = x1; x1 = x2; f1 = f2; x2 = (1 - PHI) * a + PHI * b; f2 = pathDistance(rotateBy(pts, x2), t.points); }
+      }
+      const d = Math.min(f1, f2);
+      if (d < best) { best = d; name = t.name; }
+    }
+    const score = Math.max(0, 1 - best / HALF_DIAG);
+    return { name, score };
+  }
+
+  function makeTemplate(name, raw) { return { name, points: normalize(raw) }; }
+  return { recognize, makeTemplate, normalize };
+})();
+
+
+</script>
+<script>
+// Hand-drawn reference strokes (coordinates in a 0..100 box, y downward). Each is one continuous stroke.
+const STROKES = {
+  '0': [[50,0],[85,15],[100,50],[85,85],[50,100],[15,85],[0,50],[15,15],[50,0]],
+  '1': [[40,15],[60,0],[60,100]],
+  '2': [[5,25],[25,5],[60,0],[90,20],[85,45],[50,70],[0,100],[100,100]],
+  '3': [[5,10],[50,0],[95,15],[60,45],[95,70],[90,90],[50,100],[5,90]],
+  '4': [[70,100],[70,0],[0,70],[100,70]],
+  '5': [[90,0],[15,0],[10,45],[60,38],[95,60],[90,90],[50,100],[5,85]],
+  '6': [[80,5],[40,20],[10,60],[15,90],[50,100],[90,80],[80,50],[40,50],[10,65]],
+  '7': [[0,0],[100,0],[40,100]],
+  '8': [[50,50],[15,30],[25,5],[50,0],[80,8],[85,30],[50,50],[10,70],[20,95],[50,100],[85,90],[90,70],[50,50]],
+  '9': [[90,40],[60,55],[15,40],[25,5],[60,0],[90,20],[90,50],[70,100],[30,100],[5,95]],
+  'I': [[50,0],[50,100]],
+  'L': [[15,0],[15,100],[90,100]],
+  'O': [[50,0],[90,20],[100,60],[70,100],[30,100],[0,60],[10,20],[50,0]],
+  'T': [[0,0],[100,0],[50,0],[50,100]],
+  'V': [[0,0],[50,100],[100,0]],
+  'X': [[0,0],[100,100],[50,50],[100,0],[0,100]],
+  'Z': [[0,0],[100,0],[0,100],[100,100]],
+  'A': [[0,100],[50,0],[100,100],[75,55],[25,55]]
+};
+
+</script>
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const octx = overlay.getContext('2d');
+  const trail = document.getElementById('trail');
+  const tctx = trail.getContext('2d');
+  const status = document.getElementById('status');
+  const fingerOut = document.getElementById('finger');
+  const writeOut = document.getElementById('write');
+  const hint = document.getElementById('hint');
+
+  // --- Finger counting -------------------------------------------------------
+  const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
+  const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  function countFingers(lm) {
+    const wrist = lm[0];
+    let n = 0;
+    // Thumb: tip further from wrist than its IP joint
+    if (d2(wrist, lm[4]) > d2(wrist, lm[3]) * 1.1) n++;
+    for (let i = 0; i < 4; i++) if (d2(wrist, lm[TIPS[i]]) > d2(wrist, lm[PIPS[i]]) * 1.15) n++;
+    return n;
+  }
+
+  const history = []; // smoothing buffer for displayed digit
+  let shownDigit = null;
+  function pushDigit(v) {
+    history.push(v); if (history.length > 10) history.shift();
+    const counts = {};
+    for (const x of history) counts[x] = (counts[x] || 0) + 1;
+    const [best, c] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (history.length >= 6 && c >= 7) shownDigit = +best;
+    fingerOut.textContent = shownDigit === null ? '–' : shownDigit;
+  }
+
+  // --- Air writing -----------------------------------------------------------
+  const STROKE_END_MS = 1100;
+  let stroke = [];          // points in mirrored canvas space (0..1)
+  let lastDrawAt = 0;
+  let pointing = false;
+  let lastResult = null;
+
+  function isPointing(lm) {
+    const index = d2(lm[0], lm[8]) > d2(lm[0], lm[6]) * 1.15;
+    const middle = d2(lm[0], lm[12]) > d2(lm[0], lm[10]) * 1.15;
+    const ring = d2(lm[0], lm[16]) > d2(lm[0], lm[14]) * 1.15;
+    return index && !middle && !ring;
+  }
+
+  function finishStroke() {
+    if (stroke.length > 12) {
+      // Normalize to the canvas size used by the recognizer
+      const pts = stroke.map(p => ({ x: p.x * 500, y: p.y * 500 }));
+      const r = ONE.recognize(pts, TEMPLATES);
+      const label = r.score > 0.55 ? r.name : '?';
+      lastResult = { label, score: r.score };
+      writeOut.textContent = label;
+      writeOut.title = `confidence ${(r.score * 100).toFixed(0)}%`;
+      hint.textContent = `تشخیص: ${label} (اطمینان ${(r.score * 100).toFixed(0)}٪)`;
+    }
+    stroke = [];
+    tctx.clearRect(0, 0, trail.width, trail.height);
+  }
+
+  function clearAll() {
+    stroke = []; tctx.clearRect(0, 0, trail.width, trail.height);
+    writeOut.textContent = '–'; hint.textContent = 'پاک شد.'; lastResult = null;
+  }
+
+  function drawTrail() {
+    tctx.clearRect(0, 0, trail.width, trail.height);
+    if (stroke.length < 2) return;
+    tctx.lineWidth = 10; tctx.lineCap = 'round'; tctx.lineJoin = 'round';
+    tctx.strokeStyle = '#c084fc'; tctx.shadowColor = '#a855f7'; tctx.shadowBlur = 16;
+    tctx.beginPath();
+    stroke.forEach((p, i) => { const x = p.x * trail.width, y = p.y * trail.height; i ? tctx.lineTo(x, y) : tctx.moveTo(x, y); });
+    tctx.stroke();
+  }
+
+  // --- MediaPipe -------------------------------------------------------------
+  function onResults(res) {
+    const w = overlay.width = video.videoWidth || 640;
+    const h = overlay.height = video.videoHeight || 480;
+    octx.save(); octx.clearRect(0, 0, w, h);
+    let total = 0;
+    let pointer = null;
+
+    (res.multiHandLandmarks || []).forEach(lm => {
+      total += countFingers(lm);
+      // Draw skeleton (mirrored to match the flipped video)
+      octx.strokeStyle = '#a855f7'; octx.lineWidth = 3; octx.shadowColor = '#c084fc'; octx.shadowBlur = 10;
+      for (const [a, b] of HAND_CONNECTIONS) {
+        octx.beginPath(); octx.moveTo((1 - lm[a].x) * w, lm[a].y * h); octx.lineTo((1 - lm[b].x) * w, lm[b].y * h); octx.stroke();
+      }
+      octx.fillStyle = '#22d3ee';
+      for (const p of lm) { octx.beginPath(); octx.arc((1 - p.x) * w, p.y * h, 4, 0, Math.PI * 2); octx.fill(); }
+      if (!pointer && isPointing(lm)) pointer = lm[8];
+    });
+    octx.restore();
+
+    pushDigit(total);
+
+    const now = performance.now();
+    if (pointer) {
+      pointing = true; lastDrawAt = now;
+      stroke.push({ x: 1 - pointer.x, y: pointer.y });
+      drawTrail();
+    } else if (pointing && now - lastDrawAt > STROKE_END_MS) {
+      pointing = false; finishStroke();
+    }
+
+    // Fist (no fingers) clears the board
+    if (total === 0 && res.multiHandLandmarks && res.multiHandLandmarks.length === 1 && !pointer) {
+      // only clear after the fist is held briefly, to avoid accidental resets
+      if (!onResults.fistSince) onResults.fistSince = now;
+      if (now - onResults.fistSince > 1200) { clearAll(); onResults.fistSince = 0; }
+    } else onResults.fistSince = 0;
+  }
+
+  const HAND_CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+  function start() {
+    if (typeof Hands === 'undefined' || typeof Camera === 'undefined') {
+      status.textContent = 'کتابخانه‌ی MediaPipe لود نشد. اینترنت یا CDN رو چک کن.'; return;
+    }
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.onResults(onResults);
+    const cam = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 640, height: 480
+    });
+    cam.start().then(() => { status.textContent = 'دوربین فعاله. دستت رو جلوی دوربین بگیر.'; })
+      .catch(() => { status.textContent = 'دسترسی به دوربین داده نشد.'; });
+  }
+
+  document.getElementById('clear').addEventListener('click', clearAll);
+  document.getElementById('start').addEventListener('click', e => { e.target.disabled = true; start(); });
+  // Templates from templates.js, recognizer from recognizer.js
+  const TEMPLATES = Object.entries(STROKES).map(([n, p]) => ONE.makeTemplate(n, p.map(([x, y]) => ({ x: x * 5, y: y * 5 }))));
+})();
+
+</script>
+</body>
+</html>
