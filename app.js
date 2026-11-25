@@ -151,8 +151,7 @@
   let fistSince = 0;
 
   function onResults(res) {
-    const w = overlay.width = video.videoWidth || 640;
-    const h = overlay.height = video.videoHeight || 480;
+    const w = overlay.width, h = overlay.height;
     const now = performance.now();
     octx.clearRect(0, 0, w, h);
     let total = 0, pointer = null;
@@ -188,17 +187,43 @@
     } else fistSince = 0;
   }
 
+  const IS_MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || matchMedia('(max-width:700px)').matches;
+
   function start() {
     if (typeof Hands === 'undefined' || typeof Camera === 'undefined') {
       status.textContent = 'کتابخانه‌ی MediaPipe لود نشد. اینترنت یا CDN رو چک کن.'; return;
     }
     const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
-    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: IS_MOBILE ? 0 : 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
     hands.onResults(onResults);
-    const cam = new Camera(video, { onFrame: async () => { await hands.send({ image: video }); }, width: 640, height: 480 });
+
+    let busy = false; // skip frames while the previous one is still processing (keeps phones responsive)
+    const cam = new Camera(video, {
+      onFrame: async () => {
+        if (busy) return;
+        busy = true;
+        try { await hands.send({ image: video }); } finally { busy = false; }
+      },
+      width: IS_MOBILE ? 480 : 640,
+      height: IS_MOBILE ? 360 : 480,
+      facingMode: 'user'
+    });
     cam.start().then(() => { status.textContent = 'دوربین فعاله. دستت رو جلوی دوربین بگیر.'; beep(520, 0.1, 'triangle'); })
-      .catch(() => { status.textContent = 'دسترسی به دوربین داده نشد.'; });
+      .catch(() => { status.textContent = 'دسترسی به دوربین داده نشد. تو تنظیمات مرورگر اجازه‌ی دوربین رو بده.'; });
   }
+
+  // Keep the stage the same shape as the camera feed, so the video, skeleton and trail line up on every screen size
+  video.addEventListener('loadedmetadata', () => {
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    document.querySelector('.stage').style.aspectRatio = `${vw} / ${vh}`;
+    overlay.width = vw; overlay.height = vh;
+    trail.width = vw; trail.height = vh;
+  });
 
   const TEMPLATES = Object.entries(STROKES).map(([n, p]) => ONE.makeTemplate(n, p.map(([x, y]) => ({ x: x * 5, y: y * 5 }))));
 
